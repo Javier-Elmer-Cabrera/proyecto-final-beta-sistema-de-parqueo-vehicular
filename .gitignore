@@ -1,0 +1,13 @@
+# Documentacion interna del equipo (no debe subirse)
+Documentos/
+
+# Archivos compilados y carpetas de build
+build/
+out/
+dist/
+*.class
+
+# Configuracion del IDE
+.idea/
+nbproject/private/
+*.iml

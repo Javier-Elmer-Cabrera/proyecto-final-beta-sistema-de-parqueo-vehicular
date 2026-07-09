@@ -12,10 +12,6 @@ import java.awt.geom.RoundRectangle2D;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Queue;
-import java.util.Map;
 
 public class SistemaParqueoGUI extends JFrame {
 
@@ -60,8 +56,9 @@ public class SistemaParqueoGUI extends JFrame {
     // Historial amigable
     private JPanel panelHistorial;
 
-    // Tarjetas de espacio (para no recrear componentes y evitar parpadeos)
-    private final List<EspacioCard> cardsEspacios = new ArrayList<>();
+    // Tarjetas de espacio (para no recrear componentes y evitar parpadeos).
+    // Arreglo simple: la cantidad de espacios es fija durante la ejecucion.
+    private EspacioCard[] cardsEspacios;
 
     // Tabla
     private JTable tableVehiculos;
@@ -543,10 +540,10 @@ public class SistemaParqueoGUI extends JFrame {
         JTextArea txtTarifaInfo = new JTextArea(
                 "Tarifa por minuto: S/. " + String.format("%.2f", sistema.getTarifaPorMinuto()) + "\n" +
                 "Monitoreo en tiempo real: Activo (1s)\n" +
-                "Estructuras de datos utilizadas:\n" +
-                "  - Grafo (Distribución de espacios y rutas)\n" +
-                "  - Tabla Hash (Búsqueda veloz de placa)\n" +
-                "  - Cola de prioridad/simple (Vehículos esperando)"
+                "Estructuras de datos (implementación propia, sin colecciones):\n" +
+                "  - Grafo con lista de adyacencia (nodos enlazados)\n" +
+                "  - Tabla Hash con encadenamiento (función hash manual)\n" +
+                "  - Cola FIFO con nodos enlazados (frente/atrás)"
         );
         txtTarifaInfo.setFont(FONT_BODY);
         txtTarifaInfo.setForeground(COLOR_TEXT_PRIMARY);
@@ -570,12 +567,13 @@ public class SistemaParqueoGUI extends JFrame {
     // --- LOGICA DE INICIALIZACION DE TARJETAS DE ESPACIOS (SOLO UNA VEZ) ---
     private void inicializarMapaGrid() {
         panelMapaGrid.removeAll();
-        cardsEspacios.clear();
 
-        List<EspacioParqueo> espacios = sistema.getGrafoEspacios();
-        for (EspacioParqueo espacio : espacios) {
-            EspacioCard card = new EspacioCard(espacio);
-            cardsEspacios.add(card);
+        // Una tarjeta por cada vertice del grafo, en orden fisico 1..N
+        int total = sistema.getCantidadEspacios();
+        cardsEspacios = new EspacioCard[total];
+        for (int id = 1; id <= total; id++) {
+            EspacioCard card = new EspacioCard(sistema.getEspacio(id));
+            cardsEspacios[id - 1] = card;
             panelMapaGrid.add(card);
         }
 
@@ -601,23 +599,21 @@ public class SistemaParqueoGUI extends JFrame {
             return;
         }
 
-        // Validación de existencia en el parqueo
+        // Validación de existencia en el parqueo (consulta a la tabla hash manual)
         String placaUpper = texto.toUpperCase();
-        if (sistema.getMapaPlacas().containsKey(placaUpper)) {
+        if (sistema.estaEstacionado(placaUpper)) {
             lblValidation.setText("¡El vehículo ya está estacionado!");
             lblValidation.setForeground(COLOR_DANGER);
             btnRegistrar.setEnabled(false);
             return;
         }
 
-        // Validación de existencia en la cola de espera
-        for (Vehiculo v : sistema.getColaEntradaSalida()) {
-            if (v.getPlaca().equalsIgnoreCase(placaUpper)) {
-                lblValidation.setText("¡El vehículo ya está en cola!");
-                lblValidation.setForeground(COLOR_WARNING);
-                btnRegistrar.setEnabled(false);
-                return;
-            }
+        // Validación de existencia en la cola de espera (recorrido de la cola manual)
+        if (sistema.estaEnCola(placaUpper)) {
+            lblValidation.setText("¡El vehículo ya está en cola!");
+            lblValidation.setForeground(COLOR_WARNING);
+            btnRegistrar.setEnabled(false);
+            return;
         }
 
         lblValidation.setText("✓ Formato válido y disponible");
@@ -662,7 +658,8 @@ public class SistemaParqueoGUI extends JFrame {
     private void ejecutarSalidaConConfirmacion(String placa) {
         if (placa == null || placa.isEmpty()) return;
 
-        EspacioParqueo espacio = sistema.getMapaPlacas().get(placa);
+        // Busqueda O(1) en la tabla hash manual: placa -> espacio
+        EspacioParqueo espacio = sistema.buscarEspacioPorPlaca(placa);
         if (espacio == null) {
             mostrarAlertaDialogo("Error", "El vehículo con placa " + placa + " no se encuentra en el parqueo.", JOptionPane.ERROR_MESSAGE);
             return;
@@ -720,10 +717,12 @@ public class SistemaParqueoGUI extends JFrame {
     }
 
     private void actualizarIndicadores() {
-        int totalEspacios = sistema.getGrafoEspacios().size();
-        int ocupados = sistema.getMapaPlacas().size();
+        // Consultas a las estructuras manuales: vertices del grafo,
+        // tamano de la tabla hash y tamano de la cola.
+        int totalEspacios = sistema.getCantidadEspacios();
+        int ocupados = sistema.contarEstacionados();
         int disponibles = totalEspacios - ocupados;
-        int cola = sistema.getColaEntradaSalida().size();
+        int cola = sistema.contarEnCola();
         double ingresos = sistema.getIngresosTotales();
 
         // Actualizar Dashboard
@@ -744,6 +743,7 @@ public class SistemaParqueoGUI extends JFrame {
     private void actualizarMapaGrid() {
         // En lugar de remover y recrear, solo mandamos a actualizar el estado a cada tarjeta.
         // Esto previene parpadeos y mantiene los listeners y hover funcionando sin trabas.
+        if (cardsEspacios == null) return; // aun no se inicializa el mapa
         for (EspacioCard card : cardsEspacios) {
             card.actualizarEstado();
         }
@@ -1191,7 +1191,11 @@ public class SistemaParqueoGUI extends JFrame {
     // =========================================================================
     private class VehiculosTableModel extends AbstractTableModel {
         private final String[] columnNames = {"# Espacio", "Placa de Vehículo", "Fecha/Hora Entrada", "Tiempo Transcurrido", "Tarifa Acumulada"};
-        private final List<Object[]> dataList = new ArrayList<>();
+
+        // Matriz de filas (sin colecciones): como maximo hay una fila por
+        // espacio del parqueo, asi que se dimensiona con ese tope fijo.
+        private Object[][] filas = new Object[0][];
+        private int numFilas = 0;
         private String filtro = "";
 
         public void setFiltroPlaca(String filtro) {
@@ -1200,10 +1204,13 @@ public class SistemaParqueoGUI extends JFrame {
         }
 
         private void actualizarLista() {
-            dataList.clear();
-            List<EspacioParqueo> espacios = sistema.getGrafoEspacios();
+            int totalEspacios = sistema.getCantidadEspacios();
+            filas = new Object[totalEspacios][];
+            numFilas = 0;
 
-            for (EspacioParqueo esp : espacios) {
+            // Recorrer los vertices del grafo en orden fisico 1..N
+            for (int id = 1; id <= totalEspacios; id++) {
+                EspacioParqueo esp = sistema.getEspacio(id);
                 if (esp.isOcupado()) {
                     Vehiculo v = esp.getVehiculoAsignado();
                     String placa = v.getPlaca();
@@ -1223,13 +1230,14 @@ public class SistemaParqueoGUI extends JFrame {
                     String tiempoTexto = minutosSimulados + " minutos (simulados)";
                     String tarifaTexto = String.format("S/. %.2f", tarifa);
 
-                    dataList.add(new Object[]{
+                    filas[numFilas] = new Object[]{
                             "Espacio #" + esp.getId(),
                             placa,
                             horaFormato,
                             tiempoTexto,
                             tarifaTexto
-                    });
+                    };
+                    numFilas++;
                 }
             }
             fireTableDataChanged();
@@ -1238,7 +1246,7 @@ public class SistemaParqueoGUI extends JFrame {
         @Override
         public int getRowCount() {
             actualizarLista();
-            return dataList.size();
+            return numFilas;
         }
 
         @Override
@@ -1253,8 +1261,8 @@ public class SistemaParqueoGUI extends JFrame {
 
         @Override
         public Object getValueAt(int row, int col) {
-            if (row < 0 || row >= dataList.size()) return null;
-            return dataList.get(row)[col];
+            if (row < 0 || row >= numFilas) return null;
+            return filas[row][col];
         }
     }
 }
